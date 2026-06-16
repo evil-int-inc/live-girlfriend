@@ -1,183 +1,132 @@
-import React, { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useFrame } from '@react-three/fiber'
-import { useGLTF, useAnimations } from '@react-three/drei'
-import { SkeletonUtils } from 'three-stdlib'
+import { useGLTF } from '@react-three/drei'
+import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm'
+import { createVRMAnimationClip, VRMAnimationLoaderPlugin } from '@pixiv/three-vrm-animation'
+import type { VRM } from '@pixiv/three-vrm'
+import type { VRMAnimation } from '@pixiv/three-vrm-animation'
+import type { GLTF, GLTFLoader, GLTFLoaderPlugin } from 'three-stdlib'
 import * as THREE from 'three'
 
-// Mapping from Rhubarb visemes to Morph Target names
-// Adjust 'aa', 'ih', 'ou' to match your VRM/GLB blend shape names
-// Common VRM blend shapes: 'A', 'I', 'U', 'E', 'O', 'Blink', 'Joy', etc.
-// Common ARKit: 'jawOpen', 'mouthSMILE', etc.
-const visemeMap: Record<string, string[]> = {
-    'A': ['aa', 'A'],
-    'B': ['ih', 'I'],
-    'C': ['ou', 'U'],
-    'D': ['aa', 'E'],
-    'E': ['ou', 'O'],
-    'F': ['ou', 'U'],
-    'G': ['ih', 'I'],
-    'H': ['ih', 'I'],
-    'X': ['aa', 'A']
+const AVATAR_MODEL_PATH = '/ai-girl-1.vrm'
+const AVATAR_ANIMATION_PATH = '/vrma/VRMA_01.vrma'
+
+type VRMGLTF = GLTF & {
+    userData: {
+        vrm?: VRM
+    }
+}
+
+type VRMAnimationGLTF = GLTF & {
+    userData: {
+        vrmAnimations?: VRMAnimation[]
+    }
+}
+
+type MouthCue = {
+    start: number
+    end: number
+    value: string
+}
+
+type VisemePayload = {
+    mouthCues: MouthCue[]
+}
+
+type SpeakEventDetail = {
+    audioUrl: string
+    visemes: VisemePayload
+}
+
+// Mapping from Rhubarb visemes to VRM expression preset names.
+const visemeExpressionMap: Record<string, string[]> = {
+    A: ['aa'],
+    B: ['ih'],
+    C: ['ou'],
+    D: ['ee'],
+    E: ['oh'],
+    F: ['ou'],
+    G: ['ih'],
+    H: ['ih'],
+    X: []
+}
+
+const mouthExpressionNames = ['aa', 'ih', 'ou', 'ee', 'oh']
+type VRMLoaderParser = ConstructorParameters<typeof VRMLoaderPlugin>[0]
+type VRMAnimationLoaderParser = ConstructorParameters<typeof VRMAnimationLoaderPlugin>[0]
+
+const extendVRMLoader = (loader: GLTFLoader) => {
+    // three-vrm and Drei type GLTFLoader from different modules, but the runtime plugin API is the same.
+    loader.register(
+        (parser) => new VRMLoaderPlugin(parser as unknown as VRMLoaderParser) as unknown as GLTFLoaderPlugin
+    )
+}
+
+const extendVRMAnimationLoader = (loader: GLTFLoader) => {
+    // three-vrm-animation shares the same runtime plugin API with three-stdlib's GLTFLoader.
+    loader.register(
+        (parser) =>
+            new VRMAnimationLoaderPlugin(parser as unknown as VRMAnimationLoaderParser) as unknown as GLTFLoaderPlugin
+    )
 }
 
 export const Avatar = () => {
-    // Mock paths - user will replace these files in public/ folder
-    const { scene } = useGLTF('/avatar.glb')
-    const { animations: rawAnimations } = useGLTF('/animation2.glb')
+    const vrmGltf = useGLTF(AVATAR_MODEL_PATH, true, true, extendVRMLoader) as VRMGLTF
+    const animationGltf = useGLTF(AVATAR_ANIMATION_PATH, true, true, extendVRMAnimationLoader) as VRMAnimationGLTF
 
-    // Clone correctly using useMemo to avoid re-cloning every render
-    const clone = React.useMemo(() => SkeletonUtils.clone(scene), [scene])
+    const vrm = vrmGltf.userData.vrm
+    const vrmAnimation = animationGltf.userData.vrmAnimations?.[0]
+    const avatarScene: THREE.Group = vrm?.scene ?? vrmGltf.scene
     const group = useRef<THREE.Group>(null)
+    const mixerRef = useRef<THREE.AnimationMixer | null>(null)
+    const normalizedVrmRef = useRef<VRM | null>(null)
 
-    // Process animations: Rename Mixamo bones to VRM bones and filter out invalid tracks
-    const animations = React.useMemo(() => {
-        const modelBones = new Set<string>()
-        clone.traverse((o) => {
-            if ((o as THREE.Bone).isBone) modelBones.add(o.name)
-        })
-        console.log("Avatar Bones:", Array.from(modelBones).sort().slice(0, 10))
+    useEffect(() => {
+        if (vrm && normalizedVrmRef.current !== vrm) {
+            VRMUtils.rotateVRM0(vrm)
+            normalizedVrmRef.current = vrm
+        }
+    }, [vrm])
 
-        const newAnimations = rawAnimations.map((clip) => {
-            const newClip = clip.clone()
+    const vrmaClip = useMemo(() => {
+        if (!vrm || !vrmAnimation) return null
 
-            // Filter and Rename Tracks
-            const originalTrackCount = newClip.tracks.length
-            newClip.tracks = newClip.tracks.filter((track) => {
-                // 1. Remove "mixamorig" prefix to get base name
-                let paramName = track.name.replace("mixamorig", "")
+        const clip = createVRMAnimationClip(vrmAnimation, vrm)
+        clip.name = 'VRMA_01'
+        return clip
+    }, [vrm, vrmAnimation])
 
-                // 2. Define standard Mixamo -> J_Bip mapping
-                // Mixamo often uses: Hips, Spine, Spine1, Spine2, Neck, Head, ...
-                // VRM/J_Bip uses: J_Bip_C_Hips, J_Bip_C_Spine, J_Bip_C_Chest, ...
+    useEffect(() => {
+        if (!vrm || !vrmaClip) return
 
-                const boneMap: Record<string, string> = {
-                    "Hips": "J_Bip_C_Hips",
-                    "Spine": "J_Bip_C_Spine",
-                    "Spine1": "J_Bip_C_Chest",
-                    "Spine2": "J_Bip_C_UpperChest",
-                    "Neck": "J_Bip_C_Neck",
-                    "Head": "J_Bip_C_Head",
+        const mixer = new THREE.AnimationMixer(vrm.scene)
+        const action = mixer.clipAction(vrmaClip)
 
-                    "LeftShoulder": "J_Bip_L_Shoulder",
-                    "LeftArm": "J_Bip_L_UpperArm",
-                    "LeftForeArm": "J_Bip_L_LowerArm",
-                    "LeftHand": "J_Bip_L_Hand",
-                    "LeftHandThumb1": "J_Bip_L_Thumb1",
-                    "LeftHandThumb2": "J_Bip_L_Thumb2",
-                    "LeftHandThumb3": "J_Bip_L_Thumb3",
-                    "LeftHandIndex1": "J_Bip_L_Index1",
-                    "LeftHandIndex2": "J_Bip_L_Index2",
-                    "LeftHandIndex3": "J_Bip_L_Index3",
-                    "LeftHandMiddle1": "J_Bip_L_Middle1",
-                    "LeftHandMiddle2": "J_Bip_L_Middle2",
-                    "LeftHandMiddle3": "J_Bip_L_Middle3",
-                    "LeftHandRing1": "J_Bip_L_Ring1",
-                    "LeftHandRing2": "J_Bip_L_Ring2",
-                    "LeftHandRing3": "J_Bip_L_Ring3",
-                    "LeftHandPinky1": "J_Bip_L_Little1",
-                    "LeftHandPinky2": "J_Bip_L_Little2",
-                    "LeftHandPinky3": "J_Bip_L_Little3",
+        action.reset().fadeIn(0.3).play()
+        mixerRef.current = mixer
 
-                    "RightShoulder": "J_Bip_R_Shoulder",
-                    "RightArm": "J_Bip_R_UpperArm",
-                    "RightForeArm": "J_Bip_R_LowerArm",
-                    "RightHand": "J_Bip_R_Hand",
-                    "RightHandThumb1": "J_Bip_R_Thumb1",
-                    "RightHandThumb2": "J_Bip_R_Thumb2",
-                    "RightHandThumb3": "J_Bip_R_Thumb3",
-                    "RightHandIndex1": "J_Bip_R_Index1",
-                    "RightHandIndex2": "J_Bip_R_Index2",
-                    "RightHandIndex3": "J_Bip_R_Index3",
-                    "RightHandMiddle1": "J_Bip_R_Middle1",
-                    "RightHandMiddle2": "J_Bip_R_Middle2",
-                    "RightHandMiddle3": "J_Bip_R_Middle3",
-                    "RightHandRing1": "J_Bip_R_Ring1",
-                    "RightHandRing2": "J_Bip_R_Ring2",
-                    "RightHandRing3": "J_Bip_R_Ring3",
-                    "RightHandPinky1": "J_Bip_R_Little1",
-                    "RightHandPinky2": "J_Bip_R_Little2",
-                    "RightHandPinky3": "J_Bip_R_Little3",
+        return () => {
+            action.stop()
+            mixer.stopAllAction()
+            mixer.uncacheClip(vrmaClip)
+            mixer.uncacheRoot(vrm.scene)
 
-                    "LeftUpLeg": "J_Bip_L_UpperLeg",
-                    "LeftLeg": "J_Bip_L_LowerLeg",
-                    "LeftFoot": "J_Bip_L_Foot",
-                    "LeftToeBase": "J_Bip_L_ToeBase",
-
-                    "RightUpLeg": "J_Bip_R_UpperLeg",
-                    "RightLeg": "J_Bip_R_LowerLeg",
-                    "RightFoot": "J_Bip_R_Foot",
-                    "RightToeBase": "J_Bip_R_ToeBase",
-                }
-
-                // 3. Try to map the bone name
-                // track.name is usually "mixamorigBoneName.property"
-                // So now paramName is "BoneName.property"
-                const parts = paramName.split('.')
-                const boneBaseName = parts[0]
-                const propertyName = parts[1]
-
-                let mappedBoneName = boneMap[boneBaseName]
-
-                // Fallback: if map failed, maybe it's already close or needs minor tweaks?
-                if (!mappedBoneName) {
-                    // Try direct prefix check if not in map
-                    if (boneBaseName.startsWith("Left")) mappedBoneName = "J_Bip_L_" + boneBaseName.substring(4)
-                    else if (boneBaseName.startsWith("Right")) mappedBoneName = "J_Bip_R_" + boneBaseName.substring(5)
-                }
-
-                if (mappedBoneName) {
-                    track.name = `${mappedBoneName}.${propertyName}`
-                } else {
-                    // If no mapping found, just strip mixamorig and hope for the best (usually fails for J_Bip)
-                    track.name = paramName
-                }
-
-                // 4. Validate against actual avatar bones
-                const finalBoneName = track.name.split('.')[0]
-                const finalPropertyName = track.name.split('.')[1]
-                const exists = modelBones.has(finalBoneName)
-
-                // 5. IMPORTANT: Discard position tracks for all bones except Hips
-                // Animating position on non-root bones causes distortion ("spaghetti effect")
-                if (exists && finalPropertyName === "position" && finalBoneName !== "J_Bip_C_Hips") {
-                    return false
-                }
-
-                return exists
-            })
-
-            console.log(`Clip '${newClip.name}': maintained ${newClip.tracks.length}/${originalTrackCount} tracks`)
-            if (newClip.tracks.length < originalTrackCount) {
-                const missingBones = new Set(newClip.tracks.map(t => t.name.split('.')[0]).filter(n => !modelBones.has(n)))
-                if (missingBones.size > 0) console.log("Still missing bones:", Array.from(missingBones))
+            if (mixerRef.current === mixer) {
+                mixerRef.current = null
             }
-
-            return newClip
-        })
-
-        return newAnimations
-    }, [rawAnimations, clone])
-
-    const { actions } = useAnimations(animations, group)
+        }
+    }, [vrm, vrmaClip])
 
     const [audio, setAudio] = useState<HTMLAudioElement | null>(null)
-    const [visemes, setVisemes] = useState<any>(null)
-
-    // useEffect(() => {
-    //     if (actions && Object.keys(actions).length > 0) {
-    //         const animationName = Object.keys(actions)[0]
-    //         console.log("Playing animation:", animationName)
-    //         actions[animationName]?.reset().fadeIn(0.5).play()
-    //     }
-    // }, [actions])
+    const [visemes, setVisemes] = useState<VisemePayload | null>(null)
 
     // Audio Listener
     useEffect(() => {
-        const handleSpeak = (e: any) => {
-            const { audioUrl, visemes: v } = e.detail
+        const handleSpeak = (event: Event) => {
+            const { audioUrl, visemes: nextVisemes } = (event as CustomEvent<SpeakEventDetail>).detail
             const newAudio = new Audio(audioUrl)
             setAudio(newAudio)
-            setVisemes(v)
+            setVisemes(nextVisemes)
             newAudio.play().catch(console.error)
         }
 
@@ -186,42 +135,32 @@ export const Avatar = () => {
     }, [])
 
     // Lipsync Loop
-    useFrame(() => {
+    useFrame((_, delta) => {
         if (audio && visemes && !audio.paused) {
             const time = audio.currentTime
-            const cue = visemes.mouthCues.find((c: any) => time >= c.start && time <= c.end)
+            const cue = visemes.mouthCues.find((c) => time >= c.start && time <= c.end)
 
-            clone.traverse((child) => {
-                if ((child as THREE.Mesh).isMesh && (child as THREE.Mesh).morphTargetDictionary) {
-                    const mesh = child as THREE.Mesh
-
-                    // Reset all mapped morphs
-                    Object.values(visemeMap).flat().forEach(name => {
-                        const idx = mesh.morphTargetDictionary![name]
-                        if (idx !== undefined) mesh.morphTargetInfluences![idx] = 0
-                    })
-
-                    // Set active morph
-                    if (cue) {
-                        const targetNames = visemeMap[cue.value]
-                        targetNames?.forEach(name => {
-                            const idx = mesh.morphTargetDictionary![name]
-                            if (idx !== undefined) {
-                                mesh.morphTargetInfluences![idx] = 1
-                            }
-                        })
-                    }
-                }
+            mouthExpressionNames.forEach((name) => {
+                vrm?.expressionManager?.setValue(name, 0)
             })
+
+            if (cue) {
+                visemeExpressionMap[cue.value]?.forEach((name) => {
+                    vrm?.expressionManager?.setValue(name, 1)
+                })
+            }
         }
+
+        mixerRef.current?.update(delta)
+        vrm?.update(delta)
     })
 
     return (
         <group ref={group} dispose={null}>
-            <primitive object={clone} position={[0, 0, 0]} />
+            <primitive object={avatarScene} position={[0, 0, 0]} />
         </group>
     )
 }
 
-useGLTF.preload('/avatar.glb')
-useGLTF.preload('/animation.glb')
+useGLTF.preload(AVATAR_MODEL_PATH, true, true, extendVRMLoader)
+useGLTF.preload(AVATAR_ANIMATION_PATH, true, true, extendVRMAnimationLoader)
