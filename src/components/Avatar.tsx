@@ -8,8 +8,8 @@ import type { VRMAnimation } from '@pixiv/three-vrm-animation'
 import type { GLTF, GLTFLoader, GLTFLoaderPlugin } from 'three-stdlib'
 import * as THREE from 'three'
 
-const AVATAR_MODEL_PATH = '/ai-girl-1.vrm'
-const AVATAR_ANIMATION_PATH = '/vrma/VRMA_01.vrma'
+const AVATAR_MODEL_PATH = '/ai-girl-2.vrm'
+const AVATAR_ANIMATION_PATH = '/vrma/victory.vrma'
 
 type VRMGLTF = GLTF & {
     userData: {
@@ -92,7 +92,7 @@ export const Avatar = () => {
         if (!vrm || !vrmAnimation) return null
 
         const clip = createVRMAnimationClip(vrmAnimation, vrm)
-        clip.name = 'VRMA_01'
+        clip.name = 'jump_greetings'
         return clip
     }, [vrm, vrmAnimation])
 
